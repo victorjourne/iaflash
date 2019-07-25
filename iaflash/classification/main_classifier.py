@@ -26,8 +26,10 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
-from custom_generator import DatasetDataframe, Crop
-from simple_sampler import DistributedSimpleSampler
+import iaflash
+from iaflash.classification.custom_generator import DatasetDataframe, Crop
+from iaflash.classification.simple_sampler import DistributedSimpleSampler
+from iaflash.classification.utils import gather_evaluation
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -86,25 +88,47 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 
+parser.add_argument('--val-csv', default=None, type=str,
+                    help='csv to evaluate, default val.csv')
+
+parser.add_argument('--root-dir', default=None, type=str,
+                    help='root-dir, default ROOT_DIR')
 best_acc1 = 0
 
-def gather_evaluation(filename, gpu):
-    base_filename, file_extension = os.path.splitext(filename)
-    df = pd.DataFrame()
-    print(gpu)
-    for i in range(gpu) :
-        filename_i = base_filename + '_%s'%i + file_extension
-        print('read %s'%filename_i)
-        df_i = pd.read_csv(filename_i,header=None)
-        df = pd.concat([df, df_i], ignore_index=True,axis=0)
-        os.remove(filename_i)
-
-    df.to_csv(filename,  header=False, index=False)
-    return df
+# create model
+model_names = sorted(name for name in models.__dict__
+    if name.islower() and not name.startswith("__")
+    and callable(models.__dict__[name]))
 
 
-def main():
-    args = parser.parse_args()
+
+# Wrapper of main(), called by python
+def main_classifier(dict):
+    class Args:
+        def __getattr__(self, name):
+            return None
+    args = Args()
+    for key, val in init_dict.items():
+        setattr(args, key, val)
+    for key, val in dict.items():
+        setattr(args, key, val)
+    return main(args)
+
+
+def main(args):
+    # paths definition
+    if not args.root_dir :
+        from iaflash.environment import ROOT_DIR
+        args.root_dir = ROOT_DIR
+
+    if not args.val_csv :
+        args.val_csv  = os.path.join(args.data, 'val.csv')
+
+    args.path_val_csv = os.path.dirname(args.val_csv)
+    #args.name_val_csv =  os.path.splitext(os.path.basename(args.val_csv))[0]
+
+    #
+
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -141,79 +165,55 @@ def main():
 
 
     # gather all predictions
-    predictions = gather_evaluation(os.path.join(args.data, 'predictions.csv'), ngpus_per_node)
-    probabilities = gather_evaluation(os.path.join(args.data, 'probabilities.csv'), ngpus_per_node)
-    targets = gather_evaluation(os.path.join(args.data, 'targets.csv'), ngpus_per_node)
-    indices = gather_evaluation(os.path.join(args.data, 'indices.csv'), ngpus_per_node)
+    predictions = gather_evaluation(os.path.join(args.path_val_csv ,'predictions.csv'), ngpus_per_node)
+    probabilities = gather_evaluation(os.path.join(args.path_val_csv ,'probabilities.csv'), ngpus_per_node)
+    targets = gather_evaluation(os.path.join(args.path_val_csv ,'targets.csv'), ngpus_per_node)
+    indices = gather_evaluation(os.path.join(args.path_val_csv,'indices.csv'), ngpus_per_node)
 
     # confusion_matrix
     confusion = calculate_cm(probabilities.values, targets.values)
     print(confusion)
-    """
-    # Normalize by dividing every row by its sum
-    for i in range(args.num_classes):
-        confusion_matrix[i] = confusion_matrix[i] / confusion_matrix[i].sum()
 
-
-    # Set up plot
-    fig = plt.figure(figsize=(20,20))
-    ax = fig.add_subplot(111)
-    im = ax.matshow(confusion_matrix.numpy())
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="2%", pad=0.05)
-    plt.colorbar(im, cax=cax)
-
-    # Set up axes
-    ax.set_xticklabels([''] + args.all_categories, rotation=90)
-    ax.set_yticklabels([''] + args.all_categories)
-
-    # Force label at every tick
-    ax.xaxis.set_major_locator(MultipleLocator(1))
-    ax.yaxis.set_major_locator(MultipleLocator(1))
-
-    filename = os.path.join(args.data, 'confusion_%s.jpg'%args.gpu)
-    fig.savefig(filename)
-    plt.close(fig)
-    """
+    # build results
+    build_result(args.path_val_csv, args.val_csv)
 
 def main_worker(gpu, ngpus_per_node, args):
 
-    from environment import ROOT_DIR
+    print("***" + str(args.workers) + "****")
 
     global best_acc1
     args.gpu = gpu
 
     # preload data
-    traindir = os.path.join(args.data, 'train.csv')
-    valdir = os.path.join(args.data, 'val.csv')
-
-    dftrain = pd.read_csv(traindir,usecols=['img_path',  'x1', 'y1', 'x2', 'y2', 'score' ,'target'], index_col=False)
-    dfval = pd.read_csv(valdir,usecols=['img_path',  'x1', 'y1', 'x2', 'y2', 'score' ,'target'], index_col=False)
-
-    dftrain = dftrain[dftrain['x1'].notnull()]
-    dfval = dfval[dfval['x1'].notnull()]
-
-    dftrain['target'] = dftrain['target'].astype(int)
-    dfval['target'] = dfval['target'].astype(int)
-
-
     filename = os.path.join(args.data, 'idx_to_class.json')
     with open(filename) as json_data:
         d = json.load(json_data)
         args.all_categories = [i for i in d.values()]
 
-    args.num_classes = dftrain['target'].unique().shape[0]
-    #args.num_classes = len(args.all_categories)
-    dftrain['target'] = dftrain['target'].astype(int)
-    dfval['target'] = dfval['target'].astype(int)
-
-    print('%s Images in the train set'%dftrain.shape[0])
-    print('%s Images in the val set'%dfval.shape[0])
+    #args.num_classes = dftrain['target'].unique().shape[0]
+    args.num_classes = len(args.all_categories)
     print('%s Classes'%args.num_classes)
+
+
+    valdir = os.path.join(args.val_csv)
+    dfval = pd.read_csv(valdir,usecols=['img_path',  'x1', 'y1', 'x2', 'y2', 'score' ,'target'], index_col=False)
+    #dfval = dfval[dfval['x1'].notnull()]
+    assert (dfval['img_path'].notnull() & dfval['img_path']!='').any()
+
+    dfval['target'] = dfval['target'].astype(int)
+    print('%s Images in the val set'%dfval.shape[0])
+
+    traindir = os.path.join(args.data, 'train.csv')
+    dftrain = pd.read_csv(traindir,usecols=['img_path',  'x1', 'y1', 'x2', 'y2', 'score' ,'target'], index_col=False)
+    assert (dftrain['img_path'].notnull() & dftrain['img_path']!='').any()
+    dftrain['target'] = dftrain['target'].astype(int)
+    print('%s Images in the train set'%dftrain.shape[0])
+
 
     class_weights = float(dftrain.shape[0]) / dftrain.groupby('target').size().sort_index()
     print(class_weights.shape)
     class_weights = torch.FloatTensor(class_weights.values)
+
 
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
@@ -226,6 +226,8 @@ def main_worker(gpu, ngpus_per_node, args):
         print("world_size : %s"%args.world_size)
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
+
+
     # create model
     if args.pretrained:
         print("=> using pre-trained model '{}'".format(args.arch))
@@ -235,14 +237,10 @@ def main_worker(gpu, ngpus_per_node, args):
         model = models.__dict__[args.arch]()
 
 
-    # freeze
-    #for param in model.parameters():
-    #    param.requires_grad = False
-        # Parameters of newly constructed modules have requires_grad=True by default
-
     model.fc = nn.Linear(512, args.num_classes) # assuming that the fc7 layer has 512 neurons, otherwise change it
 
     if args.distributed:
+        print("Distributed")
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
@@ -271,8 +269,6 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             model = torch.nn.DataParallel(model).cuda()
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss(class_weights).cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -301,6 +297,8 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> no checkpoint found at '{}'".format(args.resume))
 
 
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss(class_weights).cuda(args.gpu)
 
     cudnn.benchmark = True
 
@@ -314,7 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
     crop = Crop()
     # iterate images
     train_dataset = DatasetDataframe(
-        ROOT_DIR,
+        args.root_dir,
         dftrain,
         transforms.Compose([
             crop,
@@ -324,7 +322,7 @@ def main_worker(gpu, ngpus_per_node, args):
         ]))
 
     val_dataset = DatasetDataframe(
-        ROOT_DIR,
+        args.root_dir,
         dfval,
         transforms.Compose([
             crop,
@@ -353,7 +351,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     '''
     val_loader = torch.utils.data.DataLoader(
-        DatasetDataframe(ROOT_DIR, dfval, transforms.Compose([
+        DatasetDataframe(args.root_dir, dfval, transforms.Compose([
             crop,
             transforms.Resize([224,224]),
             transforms.ToTensor(),
@@ -517,44 +515,20 @@ def validate(val_loader, model, criterion, args):
 
 
 
+        print("save predictions to %s"%os.path.join(args.path_val_csv))
         # Save predictions
-        pd.DataFrame(predictions).to_csv(os.path.join(args.data, 'predictions_%s.csv' % args.gpu), header=False, index=False)
+        pd.DataFrame(predictions).to_csv(os.path.join(args.path_val_csv , 'predictions_%s.csv' % args.gpu), header=False, index=False)
 
         # Save probabilities
-        pd.DataFrame(probabilities).to_csv(os.path.join(args.data, 'probabilities_%s.csv' % args.gpu), header=False, index=False)
+        pd.DataFrame(probabilities).to_csv(os.path.join(args.path_val_csv , 'probabilities_%s.csv' % args.gpu), header=False, index=False)
 
         # Save target
-        pd.DataFrame(targets).to_csv(os.path.join(args.data, 'targets_%s.csv' % args.gpu), header=False, index=False)
+        pd.DataFrame(targets).to_csv(os.path.join(args.path_val_csv , 'targets_%s.csv' % args.gpu), header=False, index=False)
 
         # Save indices
-        pd.DataFrame(indices).to_csv(os.path.join(args.data, 'indices_%s.csv' % args.gpu), header=False, index=False)
-
-        """
-        # Normalize by dividing every row by its sum
-        for i in range(args.num_classes):
-            confusion_matrix[i] = confusion_matrix[i] / confusion_matrix[i].sum()
+        pd.DataFrame(indices).to_csv(os.path.join(args.path_val_csv , 'indices_%s.csv' % args.gpu), header=False, index=False)
 
 
-        # Set up plot
-        fig = plt.figure(figsize=(20,20))
-        ax = fig.add_subplot(111)
-        im = ax.matshow(confusion_matrix.numpy())
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="2%", pad=0.05)
-        plt.colorbar(im, cax=cax)
-
-        # Set up axes
-        ax.set_xticklabels([''] + args.all_categories, rotation=90)
-        ax.set_yticklabels([''] + args.all_categories)
-
-        # Force label at every tick
-        ax.xaxis.set_major_locator(MultipleLocator(1))
-        ax.yaxis.set_major_locator(MultipleLocator(1))
-
-        filename = os.path.join(args.data, 'confusion_%s.jpg'%args.gpu)
-        fig.savefig(filename)
-        plt.close(fig)
-        """
 
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
@@ -670,7 +644,7 @@ def create_simlink():
             else:
                 set = 'val'
             #print(row['path'],1.996row['img1'])
-            src = os.path.join(ROOT_DIR,row['path'],row['img1'])
+            src = os.path.join(args.root_dir,row['path'],row['img1'])
             base_dst = os.path.join(CARS_DIR,set,modele)
             if not os.path.exists(base_dst):
                 os.makedirs(base_dst,exist_ok=True)
@@ -682,7 +656,8 @@ def create_simlink():
 
 if __name__ == '__main__':
     #create_simlink()
-    main()
+    args = parser.parse_args()
+    main(args)
 
 """
 python main_classifier.py -a resnet18 --lr 0.01 --batch-size 256  --pretrained --dist-url 'tcp://127.0.0.1:1234' --dist-backend 'nccl' --multiprocessing-distributed --world-size 1 --rank 0
@@ -691,5 +666,4 @@ python main_classifier.py -a resnet18 --lr 0.01 --batch-size 256  --pretrained -
 python main_classifier.py -a resnet18 --lr 0.01 --batch-size 256  --pretrained --dist-url 'tcp://127.0.0.1:1234' --dist-backend 'nccl' --multiprocessing-distributed --world-size 1 --rank 0  /model/resnet18-100-2
 python main_classifier.py -a resnet18 --lr 0.01 --batch-size 256  --pretrained --dist-url 'tcp://127.0.0.1:1234' --dist-backend 'nccl' --multiprocessing-distributed --world-size 1 --rank 0   /model/resnet18-102
 python main_classifier.py -a resnet18 --lr 0.01 --batch-size 256  --pretrained --evaluate --resume /model/model_best.pth.tar --dist-url 'tcp://127.0.0.1:1234' --dist-backend 'nccl' --multiprocessing-distributed --world-size 1 --rank 0   /model/resnet18-102
-
 """

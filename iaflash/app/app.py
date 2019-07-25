@@ -5,8 +5,8 @@ import json
 from flask import Flask, render_template, Response, render_template_string, send_from_directory, request
 
 import pandas as pd
-from environment import ROOT_DIR
-from filter import filter
+from iaflash.environment import ROOT_DIR
+from iaflash.filter import filter
 WIDTH = 600
 HEIGHT = 400
 
@@ -60,11 +60,10 @@ def images_csv(csvpath):
     images = []
     dirname = os.path.dirname(csvpath)
     filename = os.path.join('/', csvpath)
-    df_val = pd.read_csv(filename)#.sample(10000)
-    df_val = df_val[df_val['x1'].notnull()]
+    df = pd.read_csv(filename)#.sample(10000)
+    #df_val = df_val[df_val['x1'].notnull()]
 
     classes_ids = read_class_reference(dirname)
-    df = df_val
     df['class_name'] = df['target'].astype(int).astype(str).replace(classes_ids)
     df['text'] = 'Label: ' + df['class_name']
     if'pred_class' in df.columns :
@@ -79,7 +78,10 @@ def images_csv(csvpath):
     if limit :
         df = df.sample(int(limit))
 
-    print(df.shape)
+    df['img_path'] = df['img_path'].astype(str)
+    df = df.sort_values(by =['img_path'],  ascending=False)
+
+    print(df.head())
     for i, row in df.iterrows():
         filename = os.path.join(ROOT_DIR,row['img_path'])
         im = Image.open(filename)
@@ -92,10 +94,10 @@ def images_csv(csvpath):
             'width': int(width),
             'height': int(height),
             'src': filename,
-            'x1': int(row["x1"]),
-            'y1': int(row["y1"]),
-            'x2': int(row["x2"]),
-            'y2': int(row["y2"]),
+            'x1': row.get("x1",0),
+            'y1': row.get("y1",0),
+            'x2': row.get("x2",0),
+            'y2': row.get("y2",0),
             'text': row['text'],
             })
 
@@ -110,6 +112,19 @@ def images_explore():
     df = filter(**request.args)
     print(df.head())
     col_img = request.args.get('col_img', 'img_name')
+    query = request.args.get('query', None)
+
+    if query:
+        print(query)
+        df = df.query(query)
+
+    df.sort_values('path',inplace=True)
+
+
+    for col in ['x1','y1','x2','y2'] :
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+
     for i, row in df.iterrows():
         filename = os.path.join(ROOT_DIR,row['path'],row[col_img])
         im = Image.open(filename)

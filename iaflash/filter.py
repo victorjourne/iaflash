@@ -8,8 +8,8 @@ import sys
 import json
 import pandas as pd
 
-from environment import ROOT_DIR, TMP_DIR, DSS_DIR, API_KEY_VIT,PROJECT_KEY_VIT, DSS_HOST, VERTICA_HOST
-from dss.api import read_dataframe
+from iaflash.environment import ROOT_DIR, TMP_DIR, DSS_DIR, API_KEY_VIT,PROJECT_KEY_VIT, DSS_HOST, VERTICA_HOST
+from iaflash.dss.api import read_dataframe
 
 
 dataset_name = 'bbox_marque_class_class'
@@ -24,6 +24,8 @@ radar_type = {
         'ETM' : 'equipement terrain mobile',
         'ETVLPL' : 'equipement terrain discriminant pl vl'
         }
+
+not_null = ['path', 'img_name']
 
 parser = argparse.ArgumentParser(description='Filter Dataset From DSS and Write it')
 
@@ -64,6 +66,9 @@ parser.add_argument('--radar', metavar='RADAR TYPE',type=str, nargs='+',
 parser.add_argument('--columns', metavar='COLUMNS',type=str, nargs='+',
                     help='Columns to retrieve',default=columns)
 
+parser.add_argument('--not-null', type=str, nargs='+',
+                    help='Filter those columns if null',default=not_null)
+
 parser.add_argument('--where', metavar='WHERE',type=str,
                     help='WHERE CLAUSE',default=None)
 
@@ -79,13 +84,18 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
 parser.add_argument( '--shuffle', dest='shuffle',action='store_true',
                     help='shuffle all rows after request the data')
 
-init_dict = dict(table=dataset_name,
-            sampling=sampling,limit=limit,
-            columns=columns,col_img='img_name')
+parser.add_argument( '--api-key', action='store_true',
+                    help='DSS api key', default=API_KEY_VIT)
+
+parser.add_argument( '--vertica-host', action='store_true',
+                    help='VERTICA Host', default=VERTICA_HOST)
+
+parser.add_argument( '--project-key', action='store_true',
+                    help='DSS project key', default=PROJECT_KEY_VIT)
 
 print('Read args')
-def main():
-    args = parser.parse_args()
+
+def main(args):
 
     if (not args.keep) or (not os.path.exists(args.dir)):
         print("Drop and recreate everything in %s ?" %args.dir )
@@ -107,26 +117,23 @@ def main():
 
 def filter(**filt_dict):
     # init Namespace object from parser init states
-    """
+
     args = parser.parse_args()
-    print (parser)
-    # overload args
-    for key, val in filt_dict.items():
-        setattr(args, key, val)
 
+    for key, val in vars(args).items():
+        print(key, val)
+        if key not in filt_dict.keys():
+            atr = val
+        else:
+            atr = filt_dict[key]
+
+        setattr(args, key, atr)
+        print("set attribute %s for key %s "%(val, atr))
+
+    main(args)
     """
-    class Args:
-        def __getattr__(self, name):
-            return None
-
-    args = Args()
-
-    for key, val in init_dict.items():
-        setattr(args, key, val)
-    for key, val in filt_dict.items():
-        setattr(args, key, val)
     return read_df(args)
-
+    """
 def read_df(args):
     conditions = ''
 
@@ -182,7 +189,12 @@ def read_df(args):
 
     if conditions != '':
         conditions += ' AND '
-    conditions += "path IS NOT NULL AND %s IS NOT NULL " %args.col_img
+
+    if args.not_null:
+        conditions_not_null = ' AND '.join(['%s IS NOT NULL'%col for col in args.not_null])
+        print(conditions_not_null)
+        conditions += conditions_not_null
+
 
     if args.nb_classes:
         if type(args.nb_classes) is str:
@@ -196,7 +208,7 @@ def read_df(args):
 
     #conditions ='join_marque_modele IS NOT NULL AND (DI_StatutDossier=4 OR DI_StatutDossier=6 OR DI_StatutDossier=13) '
     #DSS_HOST = VERTICA_HOST+":1000    print('There is %s images'%df.shape[0])
-    df = read_dataframe(API_KEY_VIT,VERTICA_HOST,PROJECT_KEY_VIT,
+    df = read_dataframe(args.api_key,args.vertica_host,args.project_key,
         args.table,args.columns,conditions,args.limit,args.sampling)
 
     df = df[df.notnull()]
@@ -267,7 +279,8 @@ def test_filter():
     df = filter(**filt_dict)
     assert df.shape == (filt_dict['limit'],len(filt_dict['columns'])), '{} not match with query'.format(df)
 if __name__ == '__main__':
-    main()
+    args = parser.parse_args()
+    main(args)
 
 """
 python filter.py --table CarteGrise_norm_melt_joined --status 4,6,13 -l 10 --dir /model/test/
