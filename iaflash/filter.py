@@ -93,6 +93,9 @@ parser.add_argument( '--vertica-host',
 parser.add_argument( '--project-key',
                     help='DSS project key', default=PROJECT_KEY_VIT)
 
+parser.add_argument( '--connector',
+                    help='Connector choose beteewn vertica or postgres', default='vertica')
+
 print('Read args')
 
 def main(args):
@@ -136,7 +139,7 @@ def dict2args(dict):
 def filter(**filt_dict):
     # init Namespace object from parser init states
 
-    dict2args(filt_dict)
+    args = dict2args(filt_dict)
     main(args)
     """
     return read_df(args)
@@ -146,7 +149,7 @@ def read_df(args):
 
     if args.columns :
         if type(args.columns) is str:
-            args.columns = args.columns.split(",")
+            args.columns = ["\"%s\""%col for col in args.columns.split(",")]
 
 
     if args.class_list:
@@ -161,7 +164,7 @@ def read_df(args):
             args.score = args.score.split(",")
         if conditions != '':
             conditions += ' AND '
-        conditions += 'score > {} '.format(args.score)
+        conditions += 'score_sivnorm > {} '.format(args.score)
 
     if args.modele :
         if type(args.modele) is str:
@@ -175,7 +178,7 @@ def read_df(args):
             args.status = args.status.split(",")
         if conditions != '':
             conditions += ' AND '
-        conditions += 'DI_StatutDossier IN ({}) '.format(', '.join([str(int(col)) for col in  args.status]))
+        conditions += '"DI_StatutDossier" IN ({}) '.format(', '.join([str(int(col)) for col in  args.status]))
 
     if args.sens :
         if type(args.sens) is str:
@@ -188,17 +191,18 @@ def read_df(args):
         if type(args.radar) is str:
             args.radar = args.radar.split(",")
         conditions += ' AND '
-        conditions += 'TYPEEQUIP_Libelle IN (%s) ' %', '.join(["'%s'"%radar_type[col] for col in  args.radar])
+        conditions += '"TYPEEQUIP_Libelle" IN (%s) ' %', '.join(["'%s'"%col for col in  args.radar])
 
     if args.where :
         if conditions != '':
             conditions += ' AND '
         conditions +=  '(' + args.where + ')'
 
-
+    """
     if conditions != '':
         conditions += ' AND '
-
+    """
+    
     if args.not_null:
         conditions_not_null = ' AND '.join(['%s IS NOT NULL'%col for col in args.not_null])
         print(conditions_not_null)
@@ -210,7 +214,7 @@ def read_df(args):
             args.nb_classes = args.nb_classes.split(",")
         group_req = conditions + ' AND ' + "class ILIKE class GROUP BY class  ORDER BY COUNT(class) DESC LIMIT {};".format(args.nb_classes)
         df = read_dataframe(API_KEY_VIT,VERTICA_HOST,PROJECT_KEY_VIT,
-            args.table,['class, COUNT(class)'],group_req)
+            args.table,['class, COUNT(class)'],group_req, args.connector)
         df['class'].to_csv(os.path.join(args.dir, 'classes.csv'), index=False)
         conditions += ' AND '
         conditions += 'class IN ({}) '.format(', '.join(["'{}'".format(i) for i in df['class'].tolist()]))
@@ -218,9 +222,11 @@ def read_df(args):
     #conditions ='join_marque_modele IS NOT NULL AND (DI_StatutDossier=4 OR DI_StatutDossier=6 OR DI_StatutDossier=13) '
     #DSS_HOST = VERTICA_HOST+":1000    print('There is %s images'%df.shape[0])
     df = read_dataframe(args.api_key,args.vertica_host,args.project_key,
-        args.table,args.columns,conditions,args.limit,args.sampling)
+        args.table,args.columns,conditions,args.limit,args.sampling, args.connector)
 
     df = df[df.notnull()]
+    print("Drop duplicates ...")
+    df.drop_duplicates('img_name',inplace=True)
 
     if args.shuffle : # shuffle but take care that img1 and img2 are bounded
         print('Start shufffing data ...')
@@ -304,8 +310,16 @@ python filter.py --table CarteGrise_norm_melt_joined --status 4 6 13 --dir /mode
 python filter.py --table CarteGrise_norm_melt_joined2 --status 4 6 13 --dir /model/resnet18-150 --nb_classes 160 --score 0.95  --sampling 0 --limit 0   --where "(TYPEEQUIP_Libelle='ETC' AND img_name LIKE '%_1.jpg') OR (TYPEEQUIP_Libelle!='ETC')"
 
 # resnet18-151
-python -m iaflash.filter --table CarteGrise_norm_melt_joined --status 4 6 13 --dir /model/resnet18-151 --keep --class_list /home/model/resnet18-151/classes-2018.csv  --sampling 0 --limit 0 --score 0.95 --where "(TYPEEQUIP_Libelle='ETC' AND img_name LIKE '%_1.jpg') OR (TYPEEQUIP_Libelle!='ETC')"
 
+time python -m iaflash.filter --table cartegrise_norm_melt_joined_psql --status 4 6 13 --dir /model/resnet18-151  \
+--class_list /model/classes-2018-151.csv  --sampling 0 --limit 0 --score 0.95 \
+--where "(\"TYPEEQUIP_Libelle\"='ETC' AND img_name LIKE '%_1.jpg') OR (\"TYPEEQUIP_Libelle\"!='ETC')" \
+--api-key dummyKey_VBfL5V9czGa9a77kcVzmwZcQvdjt8oBk \
+--project-key 'VIT3' \
+--vertica-host 192.168.4.25 \
+--connector postgres \
+--shuffle \
+--not-null x1 path img_name
 
 
 """
